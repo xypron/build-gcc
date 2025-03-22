@@ -1,4 +1,10 @@
 all:
+	make build
+
+gcc:
+	git clone git://gcc.gnu.org/git/gcc.git gcc
+
+build: gcc
 	mkdir -p build
 	cd build && \
 	../gcc/configure \
