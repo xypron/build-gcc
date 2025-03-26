@@ -1,3 +1,5 @@
+.PHONY: build
+
 all:
 	make build
 
@@ -46,6 +48,6 @@ build: gcc
 	--host=riscv64-linux-gnu \
 	--target=riscv64-linux-gnu
 	cd build && \
-	make -j$$(nproc)
+	make -j16
 	cd build && \
-	make check -j$$(nproc)
+	make check -j16
