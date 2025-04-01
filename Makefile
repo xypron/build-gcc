@@ -7,12 +7,15 @@ gcc:
 	git clone git://gcc.gnu.org/git/gcc.git gcc
 
 build: gcc
+	cd gcc && \
+	git reset --hard 2f58d8ac03911063d6a8887a2bee7b4e25ac1871
+	cd gcc && ../patch/series.sh
 	mkdir -p build
 	cd build && \
 	../gcc/configure \
 	-v \
-	--with-pkgversion='basepoints-gcc-15-8647-gcb537f0d838' \
-	--enable-languages=c,ada,cobol,c++,d,fortran,go,lto,m2,objc,obj-c++,rust \
+	--with-pkgversion='basepoints-gcc-15-8932-gacc1ea0cbfb' \
+	--enable-languages=c,ada,cobol,c++,d,fortran,lto,m2,objc,obj-c++,rust \
 	--prefix=/usr \
 	--with-gcc-major-version-only \
 	--program-suffix=-15 \

@@ -1,0 +1,202 @@
+From: Vineet Gupta <vineetg@rivosinc.com>
+Subject: [PATCH v2] RISC-V: vsetvl: skip abnormal edge on vsetvl insertion
+ [PR119533]
+Message-ID: <20250330004959.250525-1-vineetg@rivosinc.com>
+
+changes since v2
+ - dump log sanfu
+
+---
+vsetvl phase4 uses LCM guided info to insert VSETVL insns.
+It has an additional loop to insert missing vsetvls on certain edges.
+Currently it asserts/aborts on encountering EDGE_ABNORMAL.
+When enabling go frontend with V enabled, libgo build hits the assert.
+
+It seems to be safe to just skip the abnormal edge.
+
+Verified that a go toolchain build with the fix completes successfully
+and runs the testsuite.
+ rv64imafdcv_zicbom_zicboz_zicntr_zicond_zicsr_zifencei_zihintntl_zihintpause_zihpm_zfa_zfhmin_zba_zbb_zbs_zkt_zvbb_zvkt/  lp64d/ medlow |  738 /   146 |    7 /     3 |   72 /    12 |
+
+Also to make sure nothing regressed on rvv and go side, did additional 2
+sets of runs.
+
+1. RVV build, go disabled, w/ and w/o fix
+ rv64imafdcv_zvl256b_zba_zbb_zbs_zicond/  lp64d/ medlow |  244 /    96 |    7 /     3 |   67 /    12 |
+ rv64imafdcv_zvl256b_zba_zbb_zbs_zicond/  lp64d/ medlow |  244 /    96 |    7 /     3 |   67 /    12 |
+
+2. go enabled, RVV disabled, w/ and w/o fix
+ rv64imafdc_zba_zbb_zbs_zicond_zfa/  lp64d/ medlow |  155 /    47 |    0 /     0 |    0 /     0 |
+ rv64imafdc_zba_zbb_zbs_zicond_zfa/  lp64d/ medlow |  155 /    47 |    0 /     0 |    0 /     0 |
+
+	PR target/119533
+
+gcc/ChangeLog:
+
+	* config/riscv/riscv-vsetvl.cc (pre_vsetvl::emit_vsetvl): skip
+	EDGE_ABNORMAL.
+
+gcc/testsuite/ChangeLog:
+
+	* go.dg/pr119533-riscv.go: New test.
+
+Signed-off-by: Vineet Gupta <vineetg@rivosinc.com>
+---
+ gcc/config/riscv/riscv-vsetvl.cc      |   7 +-
+ gcc/testsuite/go.dg/pr119533-riscv.go | 120 ++++++++++++++++++++++++++
+ 2 files changed, 126 insertions(+), 1 deletion(-)
+ create mode 100644 gcc/testsuite/go.dg/pr119533-riscv.go
+
+diff --git a/gcc/config/riscv/riscv-vsetvl.cc b/gcc/config/riscv/riscv-vsetvl.cc
+index 0ac2538f596f..dd966b5ed5d9 100644
+--- a/gcc/config/riscv/riscv-vsetvl.cc
++++ b/gcc/config/riscv/riscv-vsetvl.cc
+@@ -3391,7 +3391,6 @@ pre_vsetvl::emit_vsetvl ()
+       edge_iterator eg_iterator;
+       FOR_EACH_EDGE (eg, eg_iterator, bb->cfg_bb ()->succs)
+ 	{
+-	  gcc_assert (!(eg->flags & EDGE_ABNORMAL));
+ 	  if (dump_file)
+ 	    {
+ 	      fprintf (
+@@ -3400,6 +3399,12 @@ pre_vsetvl::emit_vsetvl ()
+ 		eg->src->index, eg->dest->index);
+ 	      footer_info.dump (dump_file, "    ");
+ 	    }
++	  if (eg->flags & EDGE_ABNORMAL)
++	    {
++	      if (dump_file)
++		fprintf (dump_file, "\n    skipping EDGE_ABNORMAL\n");
++	      continue;
++	    }
+ 	  start_sequence ();
+ 	  insert_vsetvl_insn (EMIT_DIRECT, footer_info);
+ 	  rtx_insn *rinsn = get_insns ();
+diff --git a/gcc/testsuite/go.dg/pr119533-riscv.go b/gcc/testsuite/go.dg/pr119533-riscv.go
+new file mode 100644
+index 000000000000..30f52d267c5f
+--- /dev/null
++++ b/gcc/testsuite/go.dg/pr119533-riscv.go
+@@ -0,0 +1,120 @@
++// { dg-do compile { target riscv64*-*-* } }
++// { dg-options "-O2 -march=rv64gcv -mabi=lp64d" }
++
++// Reduced from libgo build (multi-file reduction, merged mnaully
++// and hand reduced again).
++
++package ast
++import (
++	"go/token"
++	"go/scanner"
++	"reflect"
++)
++type v struct {}
++type w func( string,  reflect.Value) bool
++func x( string,  reflect.Value) bool
++type r struct {
++	scanner.ErrorList
++}
++type ab interface {}
++type ae interface {}
++type af interface {}
++type ag struct {}
++func (ag) Pos() token.Pos
++func (ag) ah() token.Pos
++type c struct {
++	aj    ae          }
++type ak struct {
++	al    []c  }
++type (
++	am struct {
++		an    string    }
++	bs struct {
++		Value    string
++	  }
++)
++func ao(string) *am
++type (
++	ap interface {}
++	aq struct {
++		ar    bs     }
++as struct {
++		bt ak
++		an am        }
++)
++type File struct {
++	*ag
++	token.Pos
++	*am
++	at      []af
++	*v
++	au    []*aq
++	av *am
++	aw   []*ag }
++type ax struct {
++	an    string
++	*v
++	ay   map[string]File   }
++func a(az *token.FileSet, b token.Pos) int
++type k struct {
++	l token.Pos
++	ah   token.Pos
++}
++type m struct {
++	bb bool
++	bc   *ag
++}
++
++type bi uint
++func bj(a *as) string {
++	if b := a.bt; len(b.al) == 1 {
++		c := b.al[0].aj
++		if e := c; e != nil {}
++	}
++	return a.an.an
++}
++func MergePackageFiles(f ax, g bi) *File {
++	h := 0
++	bk := 0
++	k := 0
++	bl := make([]string, len(f.ay))
++	i := 0
++	for bm, a := range f.ay {
++		bl[i] = bm
++		k += len(a.at)
++	}
++	var bn *ag
++	var l token.Pos
++	if h > 0 {}
++	var bo []af
++		bu := make(map[string]int)
++		m := 0
++		for _, bm := range bl {
++			a := f.ay[bm]
++			for _, d := range a.at {
++				if g!= 0 {
++					if a, p := d.(*as); p {
++						n := bj(a)
++						if j, bp := bu[n]; bp {
++							if bo != nil && bo[j]== nil {}
++						}
++					}
++				}
++			}
++		}
++		if m > 0 {}
++	var bq []*aq
++		q := make(map[string]bool)
++		for _, bm := range bl {
++			a := f.ay[bm]
++			for _, br := range a.au {
++				if o := br.ar.Value; q[o] {}
++			}
++		}
++	var bh = make([]*ag, bk)
++		for _, bm := range bl {
++			a := f.ay[bm]
++			copy(bh, a.aw)
++		}
++	return &File{bn, l, ao(f.an), bo, f.v, bq, nil, bh}
++}
+-- 
+2.43.0
