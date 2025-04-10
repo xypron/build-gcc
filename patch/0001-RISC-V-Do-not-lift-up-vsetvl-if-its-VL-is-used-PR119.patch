@@ -1,0 +1,404 @@
+From 129ef4624c11e32dce12d46358c7c4e1e7b993b5 Mon Sep 17 00:00:00 2001
+From: Robin Dapp <rdapp.gcc@gmail.com>
+Date: Sun, 6 Apr 2025 21:17:08 +0200
+Subject: [PATCH] RISC-V: Do not lift up vsetvl if its VL is used [PR119547].
+
+Hi,
+
+before lifting up a vsetvl (that saves VL in a register) to a block we
+need to ensure that this register is not live in the block.  Otherwise
+we would overwrite the register.  There is some conceptual similarity to
+LCM's transparency property (or ANTLOC) which deals with overwriting
+an expression's operands.
+
+This patch checks in/out liveness of a block if there is not already
+a reaching vsetvl definition into the block.  If the VL register is live
+we do not perform the lift.
+
+This was found when running the OpenCV testsuite, see PR119547.
+
+Regtested on rv64gcv_zvl512b but the CI will certainly more interesting this
+time.
+
+	PR target/119547
+
+gcc/ChangeLog:
+
+	* config/riscv/riscv-vsetvl.cc (pre_vsetvl::earliest_fuse_vsetvl_info):
+	Check whether VL of lift candidate conflicts with new block's
+	uses.
+
+gcc/testsuite/ChangeLog:
+
+	* g++.target/riscv/rvv/autovec/pr119547.C: New test.
+	* g++.target/riscv/rvv/autovec/pr119547-2.C: New test.
+	* gcc.target/riscv/rvv/vsetvl/vlmax_switch_vtype-10.c: Adjust.
+---
+ gcc/config/riscv/riscv-vsetvl.cc              |  27 +++
+ .../g++.target/riscv/rvv/autovec/pr119547-2.C | 212 ++++++++++++++++++
+ .../g++.target/riscv/rvv/autovec/pr119547.C   |  82 +++++++
+ .../riscv/rvv/vsetvl/vlmax_switch_vtype-10.c  |   4 +-
+ 4 files changed, 323 insertions(+), 2 deletions(-)
+ create mode 100644 gcc/testsuite/g++.target/riscv/rvv/autovec/pr119547-2.C
+ create mode 100644 gcc/testsuite/g++.target/riscv/rvv/autovec/pr119547.C
+
+diff --git a/gcc/config/riscv/riscv-vsetvl.cc b/gcc/config/riscv/riscv-vsetvl.cc
+index 0ac2538f596..53b064e36a3 100644
+--- a/gcc/config/riscv/riscv-vsetvl.cc
++++ b/gcc/config/riscv/riscv-vsetvl.cc
+@@ -3022,6 +3022,33 @@ pre_vsetvl::earliest_fuse_vsetvl_info (int iter)
+ 		  continue;
+ 		}
+ 
++	      /* If we move a vsetvl into a new block we must ensure that it
++		 does not write a register which is live in it.
++		 General liveness doesn't give the full picture as we can
++		 still have live registers due to AVL demands.
++		 Therefore make sure that it's not just an AVL demand
++		 that would be blocking the lift by querying M_REG_DEF_LOC.
++		 */
++	      if (new_curr_info.has_vl ())
++		{
++		  rtx reg = new_curr_info.get_vl ();
++		  unsigned int regno = REGNO (reg);
++		  if (!bitmap_set_bit (m_reg_def_loc[eg->src->index], regno)
++		      && (bitmap_bit_p (df_get_live_in (eg->src), regno)
++			  || bitmap_bit_p (df_get_live_out (eg->src), regno)))
++		    {
++		      if (dump_file && (dump_flags & TDF_DETAILS))
++			{
++			  fprintf (dump_file,
++				   "      Cannot lift up vsetvl into bb %u. "
++				   "The VL operand would conflict with uses "
++				   "in the block:", eg->src->index);
++			  curr_info.dump (dump_file, "        ");
++			}
++		      continue;
++		    }
++		}
++
+ 	      if (dump_file && (dump_flags & TDF_DETAILS))
+ 		{
+ 		  fprintf (dump_file,
+diff --git a/gcc/testsuite/g++.target/riscv/rvv/autovec/pr119547-2.C b/gcc/testsuite/g++.target/riscv/rvv/autovec/pr119547-2.C
+new file mode 100644
+index 00000000000..bab44b323ba
+--- /dev/null
++++ b/gcc/testsuite/g++.target/riscv/rvv/autovec/pr119547-2.C
+@@ -0,0 +1,212 @@
++/* { dg-do run } */
++/* { dg-require-effective-target riscv_v_ok } */
++/* { dg-options "-O3 -march=rv64gcv --param=logical-op-non-short-circuit=0" } */
++
++#include <riscv_vector.h>
++
++using v_uint8 = vuint8m2_t;
++using v_int8 = vint8m2_t;
++using v_uint16 = vuint16m2_t;
++using v_int16 = vint16m2_t;
++using v_uint32 = vuint32m2_t;
++using v_int32 = vint32m2_t;
++using v_uint64 = vuint64m2_t;
++using v_int64 = vint64m2_t;
++using v_float32 = vfloat32m2_t;
++using v_float64 = vfloat64m2_t;
++
++using uchar = unsigned char;
++using schar = signed char;
++using ushort = unsigned short;
++using uint = unsigned int;
++using uint64 = unsigned long int;
++using int64 = long int;
++
++struct Size
++{
++  int width;
++  int height;
++};
++
++template <class T> struct VTraits;
++
++template <> struct VTraits<vint32m1_t>
++{
++  static inline int vlanes () { return __riscv_vsetvlmax_e32m1 (); }
++  using lane_type = int32_t;
++  static const int max_nlanes = 1024 / 32 * 2;
++};
++template <> struct VTraits<vint32m2_t>
++{
++  static inline int vlanes () { return __riscv_vsetvlmax_e32m2 (); }
++  using lane_type = int32_t;
++  static const int max_nlanes = 1024 / 32 * 2;
++};
++template <> struct VTraits<vint32m4_t>
++{
++  static inline int vlanes () { return __riscv_vsetvlmax_e32m4 (); }
++  using lane_type = int32_t;
++  static const int max_nlanes = 1024 / 32 * 2;
++};
++template <> struct VTraits<vint32m8_t>
++{
++  static inline int vlanes () { return __riscv_vsetvlmax_e32m8 (); }
++  using lane_type = int32_t;
++  static const int max_nlanes = 1024 / 32 * 2;
++};
++
++template <> struct VTraits<vfloat64m1_t>
++{
++  static inline int vlanes () { return __riscv_vsetvlmax_e64m1 (); }
++  using lane_type = double;
++  static const int max_nlanes = 1024 / 64 * 2;
++};
++template <> struct VTraits<vfloat64m2_t>
++{
++  static inline int vlanes () { return __riscv_vsetvlmax_e64m2 (); }
++  using lane_type = double;
++  static const int max_nlanes = 1024 / 64 * 2;
++};
++template <> struct VTraits<vfloat64m4_t>
++{
++  static inline int vlanes () { return __riscv_vsetvlmax_e64m4 (); }
++  using lane_type = double;
++  static const int max_nlanes = 1024 / 64 * 2;
++};
++template <> struct VTraits<vfloat64m8_t>
++{
++  static inline int vlanes () { return __riscv_vsetvlmax_e64m8 (); }
++  using lane_type = double;
++  static const int max_nlanes = 1024 / 64 * 2;
++};
++
++static inline v_float64
++v_setall_f64 (double v)
++{
++  return __riscv_vfmv_v_f_f64m2 (v, VTraits<v_float64>::vlanes ());
++}
++static inline v_float64
++vx_setall_f64 (double v)
++{
++  return v_setall_f64 (v);
++}
++
++inline v_int32
++v_load_expand_q (const schar *ptr)
++{
++  return __riscv_vwcvt_x (
++    __riscv_vwcvt_x (__riscv_vle8_v_i8mf2 (ptr, VTraits<v_int32>::vlanes ()),
++		     VTraits<v_int32>::vlanes ()),
++    VTraits<v_int32>::vlanes ());
++}
++
++static inline v_int32
++vx_load_expand_q (const schar *ptr)
++{
++  return v_load_expand_q (ptr);
++}
++
++inline v_float64
++v_cvt_f64 (const v_int32 &a)
++{
++  return __riscv_vget_f64m2 (__riscv_vfwcvt_f (a, VTraits<v_int32>::vlanes ()),
++			     0);
++}
++
++inline v_float64
++v_cvt_f64_high (const v_int32 &a)
++{
++  return __riscv_vget_f64m2 (__riscv_vfwcvt_f (a, VTraits<v_int32>::vlanes ()),
++			     1);
++}
++
++inline void
++v_store (double *ptr, const v_float64 &a)
++{
++  __riscv_vse64 (ptr, a, VTraits<v_float64>::vlanes ());
++}
++
++static inline void
++v_store_pair_as (double *ptr, const v_float64 &a, const v_float64 &b)
++{
++  v_store (ptr, a);
++  v_store (ptr + VTraits<v_float64>::vlanes (), b);
++}
++
++static inline void
++vx_load_pair_as (const schar *ptr, v_float64 &a, v_float64 &b)
++{
++  v_int32 v0 = vx_load_expand_q (ptr);
++  a = v_cvt_f64 (v0);
++  b = v_cvt_f64_high (v0);
++}
++
++inline v_float64
++v_fma (const v_float64 &a, const v_float64 &b, const v_float64 &c)
++{
++  return __riscv_vfmacc_vv_f64m2 (c, a, b, VTraits<v_float64>::vlanes ());
++}
++
++template <typename _Tp>
++static inline _Tp
++saturate_cast (double v)
++{
++  return _Tp (v);
++}
++
++template <typename _Ts, typename _Td>
++__attribute__ ((noipa)) void
++cvt_64f (const _Ts *src, size_t sstep, _Td *dst, size_t dstep, Size size,
++	 double a, double b)
++{
++  v_float64 va = vx_setall_f64 (a), vb = vx_setall_f64 (b);
++  const int VECSZ = VTraits<v_float64>::vlanes () * 2;
++
++  sstep /= sizeof (src[0]);
++  dstep /= sizeof (dst[0]);
++
++  for (int i = 0; i < size.height; i++, src += sstep, dst += dstep)
++    {
++      int j = 0;
++
++      for (; j < size.width; j += VECSZ)
++	{
++	  if (j > size.width - VECSZ)
++	    {
++	      if (j == 0 || src == (_Ts *) dst)
++		break;
++	      j = size.width - VECSZ;
++	    }
++	  v_float64 v0, v1;
++	  vx_load_pair_as (src + j, v0, v1);
++	  v0 = v_fma (v0, va, vb);
++	  v1 = v_fma (v1, va, vb);
++	  v_store_pair_as (dst + j, v0, v1);
++	}
++
++      for (; j < size.width; j++)
++	dst[j] = saturate_cast<_Td> (src[j] * a + b);
++    }
++}
++
++void
++__attribute__ ((noipa))
++cvtScale8s64f (const uchar *src_, size_t sstep, const uchar *, size_t,
++	       uchar *dst_, size_t dstep, Size size, void *scale_)
++{
++  const schar *src = (const schar *) src_;
++  double *dst = (double *) dst_;
++  double *scale = (double *) scale_;
++  cvt_64f (src, sstep, dst, dstep, size, (double) scale[0], (double) scale[1]);
++}
++
++int main ()
++{
++  uchar src[1024];
++  uchar dst[1024];
++
++  double scale[2] = {2.0, 3.0};
++  Size size {4, 1};
++
++  cvtScale8s64f (src, 4, NULL, 0, dst, 32, size, (void *)scale);
++}
+diff --git a/gcc/testsuite/g++.target/riscv/rvv/autovec/pr119547.C b/gcc/testsuite/g++.target/riscv/rvv/autovec/pr119547.C
+new file mode 100644
+index 00000000000..72f8777d70c
+--- /dev/null
++++ b/gcc/testsuite/g++.target/riscv/rvv/autovec/pr119547.C
+@@ -0,0 +1,82 @@
++/* { dg-do run } */
++/* { dg-require-effective-target riscv_v_ok } */
++/* { dg-options "-O3 -march=rv64gcv --param=logical-op-non-short-circuit=0" } */
++
++#include <riscv_vector.h>
++using v_int32 = vint32m2_t;
++using v_float64 = vfloat64m2_t;
++struct Size
++{
++  int width;
++  int height;
++};
++template <class> struct VTraits
++{
++  static int vlanes () { return __riscv_vsetvlmax_e32m2 (); }
++};
++v_int32
++v_load_expand_q (const signed char *ptr)
++{
++  return __riscv_vwcvt_x (
++    __riscv_vwcvt_x (__riscv_vle8_v_i8mf2 (ptr, VTraits<v_int32>::vlanes ()),
++		     VTraits<v_int32>::vlanes ()),
++    VTraits<v_int32>::vlanes ());
++}
++v_float64
++v_cvt_f64_high (v_int32 a)
++{
++  return __riscv_vget_f64m2 (__riscv_vfwcvt_f (a, VTraits<v_int32>::vlanes ()),
++			     1);
++}
++void
++v_store (double *ptr, v_float64 a)
++{
++  __riscv_vse64 (ptr, a, __riscv_vsetvlmax_e64m2 ());
++}
++void
++v_store_pair_as (double *ptr, v_float64 b)
++{
++  v_store (ptr, b);
++}
++void
++vx_load_pair_as (const signed char *ptr, v_float64, v_float64 &b)
++{
++  v_int32 v0;
++  b = v_cvt_f64_high (v0);
++};
++void
++cvt_64f (const signed char *src, double *dst, Size size)
++{
++  int VECSZ = __riscv_vsetvlmax_e64m2 ();
++  for (int i; i < size.height; i++)
++    {
++      int j;
++      for (;; j += VECSZ)
++	{
++	  if (j > -VECSZ)
++	    if (j == 0 || dst)
++	      break;
++	  v_float64 v0, v1;
++	  vx_load_pair_as (src, v0, v1);
++	  v_store_pair_as (dst, v1);
++	}
++      for (; j < size.width; j++)
++	dst[j] = (src[j]);
++    }
++}
++void
++cvtScale8s64f (unsigned char *src_, unsigned char *dst_,
++	       size_t, Size size, void *)
++{
++  signed char src;
++  double dst = *dst_;
++  cvt_64f (&src, &dst, size);
++}
++int main ()
++{
++  unsigned char src[1];
++  unsigned char dst[1024];
++  double scale[1];
++  Size size{4, 1};
++  cvtScale8s64f (src, dst, 32, size, scale);
++}
+diff --git a/gcc/testsuite/gcc.target/riscv/rvv/vsetvl/vlmax_switch_vtype-10.c b/gcc/testsuite/gcc.target/riscv/rvv/vsetvl/vlmax_switch_vtype-10.c
+index ddf53ca6332..0dbf34a179d 100644
+--- a/gcc/testsuite/gcc.target/riscv/rvv/vsetvl/vlmax_switch_vtype-10.c
++++ b/gcc/testsuite/gcc.target/riscv/rvv/vsetvl/vlmax_switch_vtype-10.c
+@@ -43,6 +43,6 @@ void foo (int8_t * restrict in, int8_t * restrict out, int n, int cond)
+     }
+ }
+ 
+-/* { dg-final { scan-assembler-times {vsetvli} 15 { target { no-opts "-O0" no-opts "-O1" no-opts "-Os" no-opts "-Oz" no-opts "-funroll-loops" no-opts "-g" no-opts "-flto" } } } } */
++/* { dg-final { scan-assembler-times {vsetvli} 14 { target { no-opts "-O0" no-opts "-O1" no-opts "-Os" no-opts "-Oz" no-opts "-funroll-loops" no-opts "-g" no-opts "-flto" } } } } */
+ /* { dg-final { scan-assembler-times {vsetvli\s+[a-x0-9]+,\s*zero,\s*e32,\s*mf2,\s*t[au],\s*m[au]} 3 { target { no-opts "-O0" no-opts "-O1" no-opts "-Os" no-opts "-Oz" no-opts "-funroll-loops" no-opts "-g" } } } } */
+-/* { dg-final { scan-assembler-times {vsetvli\s+[a-x0-9]+,\s*zero,\s*e16,\s*mf2,\s*t[au],\s*m[au]} 4 { target { no-opts "-O0" no-opts "-O1" no-opts "-Os" no-opts "-Oz" no-opts "-funroll-loops" no-opts "-g" } } } } */
++/* { dg-final { scan-assembler-times {vsetvli\s+[a-x0-9]+,\s*zero,\s*e16,\s*mf2,\s*t[au],\s*m[au]} 3 { target { no-opts "-O0" no-opts "-O1" no-opts "-Os" no-opts "-Oz" no-opts "-funroll-loops" no-opts "-g" } } } } */
+-- 
+2.48.1
+
